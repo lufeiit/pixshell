@@ -18,6 +18,7 @@ final class AiSshBridgeManager: NSWindowController {
     /// 注册成功/失败时回调主窗状态栏（可选）。
     var onStatus: ((String) -> Void)?
     var bridgePortProvider: (() -> Int?)?
+    var onClose: (() -> Void)?
 
     init() {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 360),
@@ -48,7 +49,14 @@ final class AiSshBridgeManager: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
-    func hide() { window?.orderOut(nil) }
+    func hide() { window?.orderOut(nil); onClose?() }
+    /// 将原窗口内容临时交给 SettingsCenter 托管；切页时由 SettingsCenter 归还。
+    func embeddedView() -> NSView {
+        reload()
+        guard let view = window?.contentView else { return NSView() }
+        view.removeFromSuperview()
+        return view
+    }
 
     // MARK: - UI
 

@@ -352,6 +352,13 @@ extension AppDelegate {
 
     // MARK: 设置（终端字号 / 主题 / 语义高亮）
     @objc func openSettings() {
+        // 所有设置入口复用同一个窗口，避免每点一项就关闭当前页并弹出新窗口。
+        if settingsCenter == nil { settingsCenter = SettingsCenter(app: self) }
+        settingsCenter?.show()
+    }
+
+    /// 旧版弹窗式设置保留一段时间供字段实现参考；菜单已改用 SettingsCenter。
+    func openSettingsLegacy() {
         let a = NSAlert.pix()
         a.messageText = "设置"
         a.addButton(withTitle: "完成")

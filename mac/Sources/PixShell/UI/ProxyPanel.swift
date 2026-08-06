@@ -10,6 +10,12 @@ final class ProxyPanel: NSView {
     private let list = NSStackView()
     private var cardX: NSLayoutConstraint!
     private var cardY: NSLayoutConstraint!
+    private var cardWidth: NSLayoutConstraint!
+    private var cardHeight: NSLayoutConstraint!
+    private var embeddedConstraints: [NSLayoutConstraint] = []
+    private var closeButton: NSButton!
+    /// false 为旧版遮罩弹层；true 为 SettingsCenter 内的自适应普通页面。
+    private var embedded = false
     private let store = ProxyStore()
     var onClose: (() -> Void)?
 
@@ -27,6 +33,7 @@ final class ProxyPanel: NSView {
         let title = NSTextField(labelWithString: "代理管理"); title.font = Theme.ui(15, .semibold); title.textColor = Theme.text
         let add = PillButton("新建代理", style: .primary, hPad: 12, target: self, action: #selector(newAction))
         let close = PillButton("关闭", style: .secondary, hPad: 12, target: self, action: #selector(closeAction))
+        closeButton = close
         let head = NSStackView(views: [title, NSView(), add, close]); head.spacing = 12; head.alignment = .centerY
         head.translatesAutoresizingMaskIntoConstraints = false
         head.addGestureRecognizer(HeaderPanGesture(target: self, action: #selector(dragCard(_:))))
@@ -42,10 +49,11 @@ final class ProxyPanel: NSView {
         card.addSubview(head); card.addSubview(scroll)
         cardX = card.centerXAnchor.constraint(equalTo: centerXAnchor)
         cardY = card.topAnchor.constraint(equalTo: topAnchor, constant: 60)
+        cardWidth = card.widthAnchor.constraint(equalToConstant: 560)
+        cardHeight = card.heightAnchor.constraint(equalToConstant: 460)
         NSLayoutConstraint.activate([
             cardX, cardY,
-            card.widthAnchor.constraint(equalToConstant: 560),
-            card.heightAnchor.constraint(equalToConstant: 460),
+            cardWidth, cardHeight,
             head.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
             head.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
             head.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
@@ -67,6 +75,7 @@ final class ProxyPanel: NSView {
     @objc private func closeAction() { onClose?() }
     // 点遮罩(卡片外)关闭
     override func mouseDown(with event: NSEvent) {
+        if embedded { super.mouseDown(with: event); return }
         let p = convert(event.locationInWindow, from: nil)
         if !card.frame.contains(p) { onClose?() } else { super.mouseDown(with: event) }
     }
@@ -76,6 +85,7 @@ final class ProxyPanel: NSView {
         return super.performKeyEquivalent(with: event)
     }
     @objc private func dragCard(_ g: NSPanGestureRecognizer) {
+        guard !embedded else { return }
         let t = g.translation(in: self)
         cardX.constant += t.x; cardY.constant += t.y
         g.setTranslation(.zero, in: self)
@@ -85,6 +95,25 @@ final class ProxyPanel: NSView {
 
     func show() {
         isHidden = false
+        reload()
+    }
+
+    /// 设置中心内嵌模式：作为普通设置页铺满内容区，不显示弹窗遮罩和关闭按钮。
+    func showEmbedded() {
+        embedded = true
+        isHidden = false
+        layer?.backgroundColor = Theme.bg.cgColor
+        card.layer?.backgroundColor = Theme.bg2.cgColor
+        closeButton.isHidden = true
+        // 移除弹层的居中与固定尺寸约束，改为跟随设置内容区四边伸缩。
+        NSLayoutConstraint.deactivate([cardX, cardY, cardWidth, cardHeight])
+        embeddedConstraints = [
+            card.topAnchor.constraint(equalTo: topAnchor, constant: 24),
+            card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
+            card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28),
+            card.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
+        ]
+        NSLayoutConstraint.activate(embeddedConstraints)
         reload()
     }
 

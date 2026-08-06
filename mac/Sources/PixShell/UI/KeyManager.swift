@@ -40,6 +40,13 @@ final class KeyManager: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
         reload()
     }
+    /// 将原窗口内容临时交给 SettingsCenter 托管；切页时由 SettingsCenter 归还。
+    func embeddedView() -> NSView {
+        reload()
+        guard let view = window?.contentView else { return NSView() }
+        view.removeFromSuperview()
+        return view
+    }
     func hide() {
         window?.orderOut(nil)
         onClose?()
