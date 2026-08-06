@@ -52,6 +52,7 @@ final class SettingsCenter: NSWindowController, NSTableViewDataSource, NSTableVi
 
     func show() {
         refreshTheme(reloadPage: false)
+        window?.center(onScreenOf: app?.window)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         if table.selectedRow < 0 { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }

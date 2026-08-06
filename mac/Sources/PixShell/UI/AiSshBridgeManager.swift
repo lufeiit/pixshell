@@ -43,9 +43,9 @@ final class AiSshBridgeManager: NSWindowController {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func show() {
+    func show(relativeTo parent: NSWindow? = nil) {
         reload()
-        window?.center()
+        window?.center(onScreenOf: parent)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

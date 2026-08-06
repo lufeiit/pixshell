@@ -397,7 +397,7 @@ extension AppDelegate {
         // 状态行按钮：已连接 → 手动断开；已断开 → 重连当前主机；没有会话 → 打开连接管理器选主机。
         monitor.onToggleConnection = { [weak self] in
             guard let self = self else { return }
-            guard self.sessions.indices.contains(self.current) else { self.connMgr?.show(); return }
+            guard self.sessions.indices.contains(self.current) else { self.connMgr?.show(relativeTo: self.window); return }
             if self.sessions[self.current].connected { self.menuDisconnect() } else { self.menuReconnect() }
         }
         return monitor
@@ -522,14 +522,11 @@ extension AppDelegate {
         ])
         placeholder.isHidden = true   // 落地页取代占位文案
 
-        // 命令栏（在 文件/命令 之上，始终可见，不随坞折叠消失）+ 拖拽条 + 文件/命令坞（可折叠、可拖高）
-        // 截图 P0：mac 缺「命令 / 输入 / 历史 / 发送」这一行 —— 之前误并到命令板，落地页/会话页都看不见。
-        let cmdBar = buildCommandBar()
+        // 命令输入、历史和发送统一由右侧命令编辑器提供；顶部不再保留重复命令栏。
         let dockResizer = buildDockResizer()
         let dock = buildBottomDock()
         dock.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(center)
-        container.addSubview(cmdBar)
         container.addSubview(dockResizer)
         container.addSubview(dock)
         let centerMin = center.heightAnchor.constraint(greaterThanOrEqualToConstant: 120); centerMin.priority = .defaultHigh
@@ -538,10 +535,7 @@ extension AppDelegate {
             center.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             center.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             centerMin,
-            cmdBar.topAnchor.constraint(equalTo: center.bottomAnchor),
-            cmdBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            cmdBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            dockResizer.topAnchor.constraint(equalTo: cmdBar.bottomAnchor),
+            dockResizer.topAnchor.constraint(equalTo: center.bottomAnchor),
             dockResizer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             dockResizer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             dockResizer.heightAnchor.constraint(equalToConstant: 4),  // 可拖命中区 4pt（原 1pt 几乎点不到）
@@ -648,6 +642,9 @@ extension AppDelegate {
             self.cmdHistory.push(text)
         }
         cmdPanel.onShowHistory = { [weak self] v in self?.showCommandHistory(v) }
+        cmdPanel.onCompleteEditor = { [weak self] text, apply in
+            self?.completeRemoteText(text, apply: apply)
+        }
         sftpPanel.onPathChange = { [weak self] p in self?.dockPathLabel?.stringValue = p }
         // P0：SFTP 独立于终端，禁止 onUserNavigate → 终端 cd 联动
         sftpPanel.onUserNavigate = nil
@@ -711,7 +708,8 @@ extension AppDelegate {
         tabs.translatesAutoresizingMaskIntoConstraints = false
 
         dock.addSubview(tabs); dock.addSubview(bottomBody)
-        dockHeightC = dock.heightAnchor.constraint(equalToConstant: dockCollapsed ? 0 : dockHeight)
+        // 折叠时保留 tab 顶栏，避免顶部重复命令栏移除后失去再次展开的入口。
+        dockHeightC = dock.heightAnchor.constraint(equalToConstant: dockCollapsed ? 34 : dockHeight)
         NSLayoutConstraint.activate([
             tabs.topAnchor.constraint(equalTo: dock.topAnchor, constant: 4),
             tabs.leadingAnchor.constraint(equalTo: dock.leadingAnchor, constant: 10),
@@ -722,12 +720,19 @@ extension AppDelegate {
             bottomBody.bottomAnchor.constraint(equalTo: dock.bottomAnchor),
             dockHeightC,
         ])
-        dock.isHidden = dockCollapsed
-        updateBottomTabs(files: true)
+        bottomBody.isHidden = dockCollapsed
+        // 启动默认显示命令面板；文件面板仍可由顶部「文件」按钮随时切换。
+        updateBottomTabs(files: false)
         return dock
     }
-    @objc func showFiles() { updateBottomTabs(files: true) }
-    @objc func showCmds() { updateBottomTabs(files: false) }
+    @objc func showFiles() {
+        if dockCollapsed { setBottomCollapsed(false) }
+        updateBottomTabs(files: true)
+    }
+    @objc func showCmds() {
+        if dockCollapsed { setBottomCollapsed(false) }
+        updateBottomTabs(files: false)
+    }
     func updateBottomTabs(files: Bool) {
         (filesTab as? PillButton)?.style = files ? .primary : .secondary
         (cmdsTab as? PillButton)?.style = files ? .secondary : .primary
@@ -813,13 +818,19 @@ extension AppDelegate {
         }
     }
 
-    // 命令栏 ▾/▴：隐藏/显示整个 文件/命令 坞（tab 行 + 面板体一起消失），终端补满。
+    // ▾/▴ 只隐藏面板体；文件/命令 tab 始终保留，点击任一 tab 也会重新展开。
     @objc func toggleDock() { setBottomCollapsed(!dockCollapsed) }
     func setBottomCollapsed(_ collapsed: Bool) {
         Log.debug("底栏折叠=\(collapsed)", "ui")
         dockCollapsed = collapsed
-        dockHeightC?.constant = collapsed ? 0 : dockHeight
-        dockView?.isHidden = collapsed
+        dockHeightC?.constant = collapsed ? 34 : dockHeight
+        dockView?.isHidden = false
+        bottomBody?.isHidden = collapsed
+        if collapsed {
+            fileOps?.isHidden = true
+        } else {
+            fileOps?.isHidden = !(sftpPanel?.isHidden == false)
+        }
         dockToggleBtn?.image = NSImage(systemSymbolName: collapsed ? "chevron.up" : "chevron.down", accessibilityDescription: nil)
         dockToggleBtn?.toolTip = collapsed ? "显示文件/命令" : "隐藏文件/命令"
     }
@@ -877,7 +888,7 @@ extension AppDelegate {
     }
 
     // MARK: 顶栏动作
-    @objc func openConnMgr() { connMgr.show() }
+    @objc func openConnMgr() { connMgr.show(relativeTo: window) }
     // ＋/网格 = 打开"快速连接/历史"落地页（而非直接连 SSH）。
     @objc func newQuickTab() { showQuickConnect() }
     func showQuickConnect() {
@@ -925,7 +936,7 @@ extension AppDelegate {
             sysInfoWindow = w
         }
         sysInfoWindow?.appearance = NSAppearance(named: Theme.dark ? .darkAqua : .aqua)
-        sysInfoWindow?.center()
+        sysInfoWindow?.center(onScreenOf: window)
         sysInfoWindow?.makeKeyAndOrderFront(nil)
         sysInfo.show("采集中…")
         ssh.exec(SysInfoPanel.command) { [weak self] out in
@@ -1076,13 +1087,13 @@ extension AppDelegate {
     /// 打开密钥管理（菜单 文件 → 密钥管理…）
     @objc func openKeyManager() {
         Log.info("打开密钥管理", "ui")
-        keyManager.show()
+        keyManager.show(relativeTo: window)
     }
 
     /// 打开主机指纹管理（汉堡 / 文件 → 主机指纹管理…）
     @objc func openFingerprintManager() {
         Log.info("打开主机指纹管理", "ui")
-        fingerprintManager.show()
+        fingerprintManager.show(relativeTo: window)
     }
 
     /// 打开 AI 工具 SSH 桥接注册窗（汉堡 / 工具 → 一键注册 AI 默认 SSH…）
@@ -1090,6 +1101,6 @@ extension AppDelegate {
         Log.info("打开 AI 工具 SSH 桥接", "ui")
         // 点开时顺手保证 CLI 在盘上，检测更准
         if let port = agentBridge?.port { AgentCLI.install(port: port) }
-        aiSshBridgeManager.show()
+        aiSshBridgeManager.show(relativeTo: window)
     }
 }

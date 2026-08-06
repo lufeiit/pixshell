@@ -6,7 +6,9 @@ import SwiftTerm
 extension AppDelegate {
     // MARK: - 会话（顶栏多 tab）
     @objc func connectSelected() {
-        guard let tv = tableView, tv.selectedRow >= 0, tv.selectedRow < store.hosts.count else { connMgr?.show(); return }
+        guard let tv = tableView, tv.selectedRow >= 0, tv.selectedRow < store.hosts.count else {
+            connMgr?.show(relativeTo: window); return
+        }
         openSession(to: store.hosts[tv.selectedRow])
     }
 

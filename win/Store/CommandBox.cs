@@ -151,10 +151,11 @@ public sealed class CommandHistory
     }
 }
 
-/// <summary>自定义命令参数模板 `${name}`。</summary>
+/// <summary>自定义命令参数模板 `${name}` / `${name:默认值}`。</summary>
 public static class CommandParams
 {
-    private static readonly Regex ParamRegex = new(@"\$\{([a-zA-Z0-9_]+)\}", RegexOptions.Compiled);
+    // 第一个冒号分隔参数名与默认值；默认值仍可包含 URL 协议、端口等冒号。
+    private static readonly Regex ParamRegex = new(@"\$\{([\p{L}\p{N}_][\p{L}\p{N}_.-]*)(?::([^}]*))?\}", RegexOptions.Compiled);
 
     /// <summary>取出模板里的参数名（去重、保序）。</summary>
     public static List<string> Parse(string template)
@@ -166,6 +167,13 @@ public static class CommandParams
             if (!names.Contains(n)) names.Add(n);
         }
         return names;
+    }
+
+    public static string? DefaultValue(string template, string name)
+    {
+        foreach (Match m in ParamRegex.Matches(template))
+            if (m.Groups[1].Value == name && m.Groups[2].Success) return m.Groups[2].Value;
+        return null;
     }
 
     /// <summary>用取值渲染模板；缺失的占位符原样保留。</summary>

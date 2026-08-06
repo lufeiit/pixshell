@@ -17,7 +17,7 @@ import AppKit
 ///  2. 命令列表在**带边框的盒子**里换行铺开，每条右边一个 ⚙（编辑/删除）；
 ///  3. 编辑器在**右栏**（不是压在下面），可收起成窄条；
 ///  4. 左右各有自己的 `发送到 + 发送`：左边发列表选中项，右边发编辑器内容。
-final class CommandPanel: NSView {
+final class CommandPanel: NSView, NSTextViewDelegate {
     private let store = QuickCommandStore()
     private let groupFlow = FlowView()          // 分类文件夹（换行）
     private let cmdFlow = FlowView()            // 命令列表（换行）
@@ -26,6 +26,7 @@ final class CommandPanel: NSView {
     private var editorScroll: NSScrollView!
     private var rightCol: NSView!
     private var rightWidthC: NSLayoutConstraint!
+    private var resizeStartRightWidth: CGFloat = 0
     private var collapseBtn: PillButton!
     private var editorParts: [NSView] = []      // 展开态显示的三块（头/编辑器/发送条）
     private var expandStrip: PillButton!        // 收起态占满窄条的展开按钮
@@ -34,13 +35,19 @@ final class CommandPanel: NSView {
     private var selectedCmdId: String?          // 列表里被选中的那条（左栏「发送」用）
     private let paramBox = CardView(radius: Theme.radiusSm, bg: Theme.bg2, border: Theme.border)
     private let paramFields = NSStackView()
+    private let paramTargetPopup = NSPopUpButton()
+    // 选中命令名称使用实色标签，和旧版命令详情的左上角标识保持一致。
+    private let detailName = PillButton("请选择命令", style: .primary, hPad: 7, height: 22,
+                                        font: Theme.ui(11, .semibold))
+    private let detailCommand = NSTextField(labelWithString: "")
     private var paramHeightC: NSLayoutConstraint!
+    private var paramFieldsWidthC: NSLayoutConstraint!
     private var paramInputs: [String: NSComboBox] = [:]
     private var pendingTemplate: String?
-    private var pendingTarget: SendTarget = .current
     private var pendingAutoReturn = true
     private static let paramHistoryKey = "pixshell.quickCommand.paramHistory"
     private static let paramHistoryLimitKey = "pixshell.quickCommand.paramHistoryLimit"
+    private var didSelectInitialGroup = false
     var parameterHistoryLimit: Int {
         let saved = UserDefaults.standard.integer(forKey: Self.paramHistoryLimitKey)
         return saved == 0 ? 50 : min(500, max(1, saved))
@@ -50,10 +57,14 @@ final class CommandPanel: NSView {
     /// 截图 P0：命令 tab 打开时编辑器被默认收/窄到看不见 —— 默认展开且更宽一点。
     private static let rightExpanded: CGFloat = 280
     private static let rightCollapsed: CGFloat = 30
+    private static let rightWidthKey = "pixshell.commandPanel.editorWidth"
 
     /// 发送回调：(命令文本, 目标)。文本已含换行。
     var onSendTo: ((String, SendTarget) -> Void)?
     var onShowHistory: ((NSView) -> Void)?
+    /// 使用当前 SSH 会话补全编辑器末尾的命令名或远端路径。
+    var onCompleteEditor: ((String, @escaping ([(title: String, value: String)]) -> Void) -> Void)?
+    private var completionPopover: NSPopover?
     /// 目标下拉数据源：已连接会话标题
     var sessionsProvider: (() -> [(title: String, connected: Bool)])?
 
@@ -79,6 +90,7 @@ final class CommandPanel: NSView {
         listScroll.translatesAutoresizingMaskIntoConstraints = false
         let listDoc = FlippedView(); listDoc.translatesAutoresizingMaskIntoConstraints = false
         cmdFlow.inset = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        cmdFlow.hGap = 4
         listDoc.addSubview(cmdFlow)
         listScroll.documentView = listDoc
         listBox.addSubview(listScroll)
@@ -118,10 +130,12 @@ final class CommandPanel: NSView {
 
         (editorScroll, editor) = ScrollableText.make(font: Theme.mono(12), editable: true,
                                                      bg: Theme.bg2, border: Theme.border)
+        editor.delegate = self
 
         edTargetPopup.font = Theme.ui(11)
         edTargetPopup.translatesAutoresizingMaskIntoConstraints = false
-        edTargetPopup.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+        edTargetPopup.setContentHuggingPriority(.required, for: .horizontal)
+        edTargetPopup.setContentCompressionResistancePriority(.required, for: .horizontal)
         let edSendLab = small("发送到")
         let edHist = PillButton(L10n.t("cmd.history"), style: .secondary, hPad: 12, height: 24, target: self, action: #selector(showHistory))
         let edSend = PillButton("发送", style: .primary, hPad: 14, height: 24,
@@ -159,39 +173,108 @@ final class CommandPanel: NSView {
 
         // ── 参数填写区：固定在命令窗口下方，不再逐个弹 NSAlert ──
         paramFields.orientation = .horizontal
-        paramFields.alignment = .bottom
+        paramFields.alignment = .centerY
         paramFields.spacing = 10
         paramFields.translatesAutoresizingMaskIntoConstraints = false
-        let cancelParams = PillButton("取消", style: .secondary, hPad: 12, height: 24,
-                                      target: self, action: #selector(cancelParamsAction))
+        // 参数数量不确定，单独使用横向滚动区域；右侧发送操作不参与滚动，也不会被挤走。
+        let paramScroll = NSScrollView()
+        paramScroll.drawsBackground = false
+        paramScroll.hasVerticalScroller = false
+        paramScroll.hasHorizontalScroller = true
+        paramScroll.autohidesScrollers = true
+        paramScroll.scrollerStyle = .overlay
+        paramScroll.translatesAutoresizingMaskIntoConstraints = false
+        let paramDoc = FlippedView()
+        paramDoc.translatesAutoresizingMaskIntoConstraints = false
+        paramDoc.addSubview(paramFields)
+        paramScroll.documentView = paramDoc
+        NSLayoutConstraint.activate([
+            paramDoc.leadingAnchor.constraint(equalTo: paramScroll.contentView.leadingAnchor),
+            paramDoc.topAnchor.constraint(equalTo: paramScroll.contentView.topAnchor),
+            paramDoc.heightAnchor.constraint(equalTo: paramScroll.contentView.heightAnchor),
+            paramDoc.widthAnchor.constraint(greaterThanOrEqualTo: paramScroll.contentView.widthAnchor),
+            paramFields.leadingAnchor.constraint(equalTo: paramDoc.leadingAnchor),
+            paramFields.trailingAnchor.constraint(lessThanOrEqualTo: paramDoc.trailingAnchor),
+            paramFields.centerYAnchor.constraint(equalTo: paramDoc.centerYAnchor),
+        ])
+        // 内容较少时文档铺满可视区，但参数栈保持固有宽度；内容较多时文档随参数扩展并可滚动。
+        let paramDocFitsContent = paramDoc.widthAnchor.constraint(equalTo: paramFields.widthAnchor)
+        paramDocFitsContent.priority = .defaultHigh
+        paramDocFitsContent.isActive = true
+        paramFields.distribution = .fill
+        paramFields.setContentHuggingPriority(.required, for: .horizontal)
+        paramFields.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // 明确使用参数内容的实际总宽度，防止 NSStackView 把剩余空间分散成巨大间距。
+        paramFieldsWidthC = paramFields.widthAnchor.constraint(equalToConstant: 0)
+        paramFieldsWidthC.isActive = true
+        detailCommand.font = Theme.mono(11); detailCommand.textColor = Theme.text
+        detailCommand.lineBreakMode = .byTruncatingTail
+        detailCommand.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let editDetail = PillButton("编辑", style: .secondary, hPad: 10, height: 24,
+                                    target: self, action: #selector(editSelectedCommand))
+        let detailHeader = NSStackView(views: [detailName, detailCommand, NSView(), editDetail])
+        detailHeader.orientation = .horizontal; detailHeader.alignment = .centerY; detailHeader.spacing = 10
+        detailHeader.translatesAutoresizingMaskIntoConstraints = false
+        paramTargetPopup.font = Theme.ui(11)
+        paramTargetPopup.addItems(withTitles: [L10n.t("cmd.current"), L10n.t("cmd.allConnected")])
+        paramTargetPopup.translatesAutoresizingMaskIntoConstraints = false
+        // 使用控件的文字固有宽度，不为下拉框保留多余的左右空白。
+        paramTargetPopup.setContentHuggingPriority(.required, for: .horizontal)
+        paramTargetPopup.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let targetLabel = small("发送到")
         let sendParams = PillButton("发送", style: .primary, hPad: 14, height: 24,
                                     target: self, action: #selector(confirmParamsAction))
-        let paramActions = NSStackView(views: [cancelParams, sendParams])
-        paramActions.orientation = .horizontal; paramActions.spacing = 6
+        // 紧凑详情区：参数和发送操作共用第二行，给上方命令列表留出尽可能多的高度。
+        let paramActions = NSStackView(views: [targetLabel, paramTargetPopup, sendParams])
+        paramActions.orientation = .horizontal; paramActions.alignment = .centerY
+        paramActions.spacing = 6; paramActions.distribution = .fill
         paramActions.translatesAutoresizingMaskIntoConstraints = false
-        paramBox.addSubview(paramFields); paramBox.addSubview(paramActions)
+        let detailLowerRow = NSStackView(views: [paramScroll, paramActions])
+        detailLowerRow.orientation = .horizontal; detailLowerRow.alignment = .centerY
+        detailLowerRow.spacing = 8; detailLowerRow.translatesAutoresizingMaskIntoConstraints = false
+        paramScroll.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        paramScroll.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        paramActions.setContentHuggingPriority(.required, for: .horizontal)
+        paramActions.setContentCompressionResistancePriority(.required, for: .horizontal)
+        paramBox.addSubview(detailHeader); paramBox.addSubview(detailLowerRow)
         paramBox.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            paramFields.leadingAnchor.constraint(equalTo: paramBox.leadingAnchor, constant: 10),
-            paramFields.topAnchor.constraint(equalTo: paramBox.topAnchor, constant: 7),
-            paramFields.bottomAnchor.constraint(equalTo: paramBox.bottomAnchor, constant: -7),
-            paramActions.trailingAnchor.constraint(equalTo: paramBox.trailingAnchor, constant: -10),
-            paramActions.bottomAnchor.constraint(equalTo: paramBox.bottomAnchor, constant: -8),
-            paramFields.trailingAnchor.constraint(lessThanOrEqualTo: paramActions.leadingAnchor, constant: -10),
+            detailHeader.topAnchor.constraint(equalTo: paramBox.topAnchor, constant: 5),
+            detailHeader.leadingAnchor.constraint(equalTo: paramBox.leadingAnchor, constant: 8),
+            detailHeader.trailingAnchor.constraint(equalTo: paramBox.trailingAnchor, constant: -8),
+            detailLowerRow.topAnchor.constraint(equalTo: detailHeader.bottomAnchor, constant: 3),
+            detailLowerRow.leadingAnchor.constraint(equalTo: paramBox.leadingAnchor, constant: 8),
+            detailLowerRow.trailingAnchor.constraint(equalTo: paramBox.trailingAnchor, constant: -8),
+            detailLowerRow.bottomAnchor.constraint(equalTo: paramBox.bottomAnchor, constant: -5),
         ])
         paramHeightC = paramBox.heightAnchor.constraint(equalToConstant: 0)
         paramHeightC.isActive = true
-        paramBox.isHidden = true
+        paramHeightC.constant = 58
+        paramBox.isHidden = false
 
         // ── 组装：顶部分类行 + [左栏 | 竖分隔 | 右栏] + 参数区 ──
         let divider = DividerView()
-        divider.wantsLayer = true; divider.layer?.backgroundColor = Theme.border.cgColor
+        divider.wantsLayer = true; divider.layer?.backgroundColor = .clear
         divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.toolTip = "拖动调整命令列表与命令编辑器宽度"
+        let dividerLine = NSView()
+        dividerLine.wantsLayer = true; dividerLine.layer?.backgroundColor = Theme.border.cgColor
+        dividerLine.translatesAutoresizingMaskIntoConstraints = false
+        divider.addSubview(dividerLine)
+        NSLayoutConstraint.activate([
+            dividerLine.centerXAnchor.constraint(equalTo: divider.centerXAnchor),
+            dividerLine.topAnchor.constraint(equalTo: divider.topAnchor),
+            dividerLine.bottomAnchor.constraint(equalTo: divider.bottomAnchor),
+            dividerLine.widthAnchor.constraint(equalToConstant: 1),
+        ])
+        divider.addGestureRecognizer(NSPanGestureRecognizer(target: self, action: #selector(resizeColumns(_:))))
 
         addSubview(groupFlow); addSubview(addBtn)
         addSubview(leftCol); addSubview(divider); addSubview(rightCol); addSubview(paramBox)
 
-        rightWidthC = rightCol.widthAnchor.constraint(equalToConstant: Self.rightExpanded)
+        let savedEditorWidth = UserDefaults.standard.double(forKey: Self.rightWidthKey)
+        rightWidthC = rightCol.widthAnchor.constraint(equalToConstant:
+            savedEditorWidth > 0 ? CGFloat(savedEditorWidth) : Self.rightExpanded)
         NSLayoutConstraint.activate([
             groupFlow.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             groupFlow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
@@ -204,17 +287,18 @@ final class CommandPanel: NSView {
             leftCol.bottomAnchor.constraint(equalTo: paramBox.topAnchor, constant: -6),
 
             divider.leadingAnchor.constraint(equalTo: leftCol.trailingAnchor, constant: 8),
-            divider.widthAnchor.constraint(equalToConstant: 1),
+            divider.widthAnchor.constraint(equalToConstant: 7),
             divider.topAnchor.constraint(equalTo: leftCol.topAnchor),
-            divider.bottomAnchor.constraint(equalTo: leftCol.bottomAnchor),
+            divider.bottomAnchor.constraint(equalTo: rightCol.bottomAnchor),
 
             rightCol.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: 8),
             rightCol.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             rightCol.topAnchor.constraint(equalTo: leftCol.topAnchor),
-            rightCol.bottomAnchor.constraint(equalTo: leftCol.bottomAnchor),
+            rightCol.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
             rightWidthC,
-            paramBox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            paramBox.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            // 参数表单属于命令列表，只占左列；右侧编辑器保持完整高度。
+            paramBox.leadingAnchor.constraint(equalTo: leftCol.leadingAnchor),
+            paramBox.trailingAnchor.constraint(equalTo: leftCol.trailingAnchor),
             paramBox.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
         ])
     }
@@ -270,12 +354,21 @@ final class CommandPanel: NSView {
     /// 分类做成**文件夹样式**并自动换行（老仓库就是一排 📁 排满折行）
     private func reloadGroups() {
         var items: [NSView] = []
-        let all = folderChip(L10n.t("cmd.all"), key: "", on: selectedGroup == nil)
-        items.append(all)
-        for g in store.groups() {
+        let groups = store.groups()
+        // 第一次打开选中用户排序中的第一个文件夹；「全部」只作为最后一个入口。
+        if !didSelectInitialGroup {
+            selectedGroup = groups.first
+            didSelectInitialGroup = true
+        }
+        for g in groups {
             items.append(folderChip(g, key: g, on: selectedGroup == g))
         }
-        groupFlow.setItems(items)
+        items.append(folderChip(L10n.t("cmd.all"), key: "", on: selectedGroup == nil))
+        groupFlow.setReorderableItems(items, draggableCount: groups.count) { [weak self] from, to in
+            guard let self, groups.indices.contains(from) else { return }
+            self.store.reorderGroup(groups[from], to: min(to, max(0, groups.count - 1)))
+            self.reloadGroups()
+        }
     }
 
     /// 分组 chip。图标用 **SF Symbol 图片**而不是 🗀 之类的字形 ——
@@ -299,6 +392,7 @@ final class CommandPanel: NSView {
         add(m, "添加命令…", #selector(newCommand))
         if !key.isEmpty {
             m.addItem(.separator())
+            m.addItem(sortMenu(title: "分组排序", id: key, action: #selector(sortGroup(_:))))
             add(m, "重命名分组…", #selector(renameGroup(_:)), key)
             add(m, "删除分组", #selector(deleteGroup(_:)), key)
         }
@@ -320,19 +414,23 @@ final class CommandPanel: NSView {
     /// 命令列表：每条 = [名称按钮][⚙]，整体换行铺开（老仓库的样子）
     private func reloadChips() {
         var items: [NSView] = []
-        for c in store.list(group: selectedGroup) {
+        let commands = store.list(group: selectedGroup)
+        if !commands.contains(where: { $0.id == selectedCmdId }) { selectedCmdId = commands.first?.id }
+        for c in commands {
             let hasParam = !(c.params?.isEmpty ?? true) || CommandParams.hasUnresolved(c.command)
             let isSel = (selectedCmdId == c.id)
-            let name = PillButton(hasParam ? "\(c.name) ⋯" : c.name,
-                                  style: isSel ? .primary : .ghost, hPad: 8, height: 22,
+            // 参数状态由下方详情栏呈现，列表名称不再追加“⋯”，避免与截断符混淆。
+            let name = PillButton(c.name,
+                                  style: isSel ? .primary : .ghost, hPad: 0, height: 22,
                                   font: Theme.ui(11), target: self, action: #selector(chipClicked(_:)))
             name.identifier = .init(c.id)
             name.toolTip = c.command
             name.menu = chipMenu(c.id)
 
             // ⚙ = 这条命令的编辑/删除入口（老仓库每条命令后面都有个齿轮）
-            let gear = PillButton("⚙", style: .ghost, hPad: 4, height: 22,
+            let gear = PillButton("⚙", style: .ghost, hPad: 0, height: 22,
                                   font: Theme.ui(11), target: self, action: #selector(gearClicked(_:)))
+            gear.foregroundColorOverride = hasParam ? Theme.accent : nil
             gear.identifier = .init(c.id)
             gear.toolTip = "编辑 / 删除"
 
@@ -341,7 +439,20 @@ final class CommandPanel: NSView {
             cell.translatesAutoresizingMaskIntoConstraints = false
             items.append(cell)
         }
-        cmdFlow.setItems(items)
+        cmdFlow.setReorderableItems(items) { [weak self] from, to in
+            guard let self, commands.indices.contains(from) else { return }
+            if self.selectedGroup == nil {
+                self.store.reorderAllCommands(from: from, to: to)
+            } else {
+                self.store.reorderCommand(commands[from].id, to: to)
+            }
+            self.reloadChips()
+        }
+        if let id = selectedCmdId, let command = commands.first(where: { $0.id == id }) {
+            showParameterForm(for: command, target: .current, names: CommandParams.parse(command.command))
+        } else {
+            clearCommandDetails()
+        }
     }
     /// 命令的右键/齿轮菜单（项目对齐参考图；老仓库叫"文件夹"，这里统一叫**分组** —— 同一个东西）
     private func chipMenu(_ id: String) -> NSMenu {
@@ -350,6 +461,7 @@ final class CommandPanel: NSView {
         add(m, "复制命令", #selector(copyCommandText(_:)), id)
         add(m, "编辑", #selector(editCommand(_:)), id)
         add(m, "删除", #selector(deleteCommand(_:)), id)
+        m.addItem(sortMenu(title: "命令排序", id: id, action: #selector(sortCommand(_:))))
         m.addItem(.separator())
         add(m, "新建分组…", #selector(newGroup))
 
@@ -369,6 +481,20 @@ final class CommandPanel: NSView {
         return m
     }
 
+    /// 排序入口放入右键子菜单，不占用命令列表的常驻空间。
+    private func sortMenu(title: String, id: String, action: Selector) -> NSMenuItem {
+        let root = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let menu = NSMenu()
+        for (label, position) in [("移到最前", "first"), ("向前", "previous"),
+                                  ("向后", "next"), ("移到最后", "last")] {
+            let item = NSMenuItem(title: label, action: action, keyEquivalent: "")
+            item.target = self; item.representedObject = ["id": id, "position": position]
+            menu.addItem(item)
+        }
+        root.submenu = menu
+        return root
+    }
+
     /// 命令列表**空白处**右键：只有"新建分组/添加命令"（对齐参考图第一张）
     override func menu(for event: NSEvent) -> NSMenu? {
         let m = NSMenu()
@@ -378,19 +504,21 @@ final class CommandPanel: NSView {
     }
 
     // MARK: 动作
-    /// 单击 = 选中并载入编辑器；**双击 = 直接发送**。
-    /// 分成两级是为了不误触：单击不该把命令打到服务器上。
+    /// 单击命令选中并显示详情；原按钮保持不重建，确保第二次点击能被识别为双击。
     @objc private func chipClicked(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue,
-              let c = store.commands.first(where: { $0.id == id }) else { return }
+              let command = store.commands.first(where: { $0.id == id }) else { return }
         selectedCmdId = id
-        editor.string = c.command
-        // NSButton 不直接给双击回调，用当前事件的 clickCount 判断
-        if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
-            sendCommand(c, to: target(of: edTargetPopup))
-            return
+        // 只更新现有按钮样式，不在第一次单击时重建列表，否则双击序列会中断。
+        for case let cell as NSStackView in cmdFlow.subviews {
+            guard let button = cell.arrangedSubviews.first as? PillButton else { continue }
+            button.style = button.identifier?.rawValue == id ? .primary : .ghost
         }
-        reloadChips()
+        let names = CommandParams.parse(command.command)
+        showParameterForm(for: command, target: target(of: paramTargetPopup), names: names)
+        if NSApp.currentEvent?.clickCount ?? 1 >= 2, names.isEmpty {
+            sendCommand(command, to: target(of: paramTargetPopup))
+        }
     }
 
     /// 发送一条命令（含 ${参数} 逐个询问）—— 双击和左栏「发送」共用
@@ -407,8 +535,11 @@ final class CommandPanel: NSView {
 
     private func showParameterForm(for command: QuickCommand, target: SendTarget, names: [String]) {
         pendingTemplate = command.command
-        pendingTarget = target
         pendingAutoReturn = command.autoReturn ?? true
+        detailName.title = command.name
+        detailName.style = .primary
+        detailCommand.stringValue = command.command.replacingOccurrences(of: "\n", with: "  ")
+        paramTargetPopup.selectItem(at: target == .allConnected ? 1 : 0)
         paramInputs.removeAll()
         paramFields.arrangedSubviews.forEach { paramFields.removeArrangedSubview($0); $0.removeFromSuperview() }
         let history = UserDefaults.standard.dictionary(forKey: Self.paramHistoryKey) as? [String: [String]] ?? [:]
@@ -418,18 +549,27 @@ final class CommandPanel: NSView {
             let label = small(name + (declared?.required == true ? " *" : ""))
             let combo = NSComboBox()
             combo.font = Theme.ui(11)
+            combo.focusRingType = .none
             combo.usesDataSource = false
             combo.addItems(withObjectValues: values)
-            combo.stringValue = values.first ?? declared?.defaultValue ?? ""
+            combo.stringValue = values.first ?? declared?.defaultValue
+                ?? CommandParams.defaultValue(command.command, for: name) ?? ""
             combo.translatesAutoresizingMaskIntoConstraints = false
-            combo.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+            // 固定为紧凑宽度，防止第一个参数抢占整行剩余空间。
+            combo.widthAnchor.constraint(equalToConstant: 150).isActive = true
+            combo.setContentHuggingPriority(.required, for: .horizontal)
+            // 标签与输入框同行显示，避免参数区为单个参数占用两行高度。
             let field = NSStackView(views: [label, combo])
-            field.orientation = .vertical; field.alignment = .leading; field.spacing = 3
+            field.orientation = .horizontal; field.alignment = .centerY; field.spacing = 5
             paramFields.addArrangedSubview(field)
             paramInputs[name] = combo
         }
+        let fields = paramFields.arrangedSubviews
+        paramFieldsWidthC.constant = fields.reduce(0) { $0 + $1.fittingSize.width }
+            + CGFloat(max(0, fields.count - 1)) * paramFields.spacing
+        paramFields.isHidden = names.isEmpty
         paramBox.isHidden = false
-        paramHeightC.constant = 60
+        paramHeightC.constant = 58
         needsLayout = true
         window?.makeFirstResponder(paramInputs[names.first ?? ""])
     }
@@ -442,21 +582,30 @@ final class CommandPanel: NSView {
             rememberParam(name, value: input.stringValue)
         }
         let text = CommandParams.render(template, values: values)
-        let target = pendingTarget
+        // 参数表单只提供用户要求的两种批量范围；指定单会话仍由编辑器发送栏负责。
+        let target: SendTarget = paramTargetPopup.indexOfSelectedItem == 1 ? .allConnected : .current
         let suffix = pendingAutoReturn ? "\r" : ""
-        hideParameterForm()
         onSendTo?(text + suffix, target)
     }
 
-    @objc private func cancelParamsAction() { hideParameterForm() }
+    @objc private func cancelParamsAction() {
+        guard let id = selectedCmdId,
+              let command = store.commands.first(where: { $0.id == id }) else { return }
+        showParameterForm(for: command, target: .current, names: CommandParams.parse(command.command))
+    }
 
-    private func hideParameterForm() {
+    private func clearCommandDetails() {
         pendingTemplate = nil
         pendingAutoReturn = true
+        detailName.title = "请选择命令"
+        detailName.style = .primary
+        detailCommand.stringValue = ""
         paramInputs.removeAll()
         paramFields.arrangedSubviews.forEach { paramFields.removeArrangedSubview($0); $0.removeFromSuperview() }
-        paramBox.isHidden = true
-        paramHeightC.constant = 0
+        paramFieldsWidthC.constant = 0
+        paramFields.isHidden = true
+        paramBox.isHidden = false
+        paramHeightC.constant = 58
         needsLayout = true
     }
 
@@ -471,12 +620,48 @@ final class CommandPanel: NSView {
     }
 
     @objc private func gearClicked(_ sender: NSButton) {
-        guard let id = sender.identifier?.rawValue else { return }
-        let m = chipMenu(id)
-        m.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
+        guard let id = sender.identifier?.rawValue,
+              store.commands.contains(where: { $0.id == id }) else { return }
+        selectedCmdId = id
+        reloadChips()
+    }
+
+    @objc private func editSelectedCommand() {
+        guard let id = selectedCmdId else { NSSound.beep(); return }
+        let item = NSMenuItem(); item.representedObject = id
+        editCommand(item)
     }
 
     // MARK: - 右侧栏动作
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard textView === editor, commandSelector == #selector(NSResponder.insertTab(_:)) else { return false }
+        onCompleteEditor?(textView.string) { [weak self] candidates in
+            guard let self else { return }
+            self.showCompletionCandidates(candidates)
+        }
+        return true
+    }
+
+    private func showCompletionCandidates(_ candidates: [(title: String, value: String)]) {
+        completionPopover?.close()
+        guard !candidates.isEmpty else { NSSound.beep(); return }
+        let vc = CompletionListVC()
+        vc.items = candidates
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior = .transient
+        vc.onSelect = { [weak self, weak pop] value in
+            guard let self else { return }
+            self.editor.string = value
+            self.editor.setSelectedRange(NSRange(location: (value as NSString).length, length: 0))
+            self.window?.makeFirstResponder(self.editor)
+            pop?.close()
+        }
+        completionPopover = pop
+        // 始终从编辑器同一侧弹出；候选窗高度固定，避免项目少时跳到另一侧。
+        pop.show(relativeTo: editorScroll.bounds, of: editorScroll, preferredEdge: .minY)
+    }
 
     @objc private func showHistory(_ sender: NSButton) {
         onShowHistory?(sender)
@@ -533,9 +718,31 @@ final class CommandPanel: NSView {
     }
     @objc private func expandEditor() { setEditorCollapsed(false) }
 
+    /// 拖动中间手柄自由调整左右栏宽度；右栏宽度持久化，下次启动继续使用。
+    @objc private func resizeColumns(_ gesture: NSPanGestureRecognizer) {
+        guard !editorCollapsed else { return }
+        switch gesture.state {
+        case .began:
+            resizeStartRightWidth = rightWidthC.constant
+        case .changed:
+            let dx = gesture.translation(in: self).x
+            let minimumRight: CGFloat = 180
+            let minimumLeft: CGFloat = 260
+            let maximumRight = max(minimumRight, bounds.width - minimumLeft - 44)
+            rightWidthC.constant = min(maximumRight, max(minimumRight, resizeStartRightWidth - dx))
+            needsLayout = true
+        case .ended:
+            UserDefaults.standard.set(Double(rightWidthC.constant), forKey: Self.rightWidthKey)
+        default:
+            break
+        }
+    }
+
     private func setEditorCollapsed(_ collapsed: Bool) {
         editorCollapsed = collapsed
-        rightWidthC.constant = collapsed ? Self.rightCollapsed : Self.rightExpanded
+        let saved = UserDefaults.standard.double(forKey: Self.rightWidthKey)
+        let expandedWidth = saved > 0 ? CGFloat(saved) : Self.rightExpanded
+        rightWidthC.constant = collapsed ? Self.rightCollapsed : expandedWidth
         // 展开态的三块内容
         for v in editorParts { v.isHidden = collapsed }
         // 收起态的窄条按钮
@@ -566,6 +773,35 @@ final class CommandPanel: NSView {
         store.removeGroup(g)
         if selectedGroup == g { selectedGroup = nil }
         reloadGroups(); reloadChips()
+    }
+    @objc private func sortGroup(_ sender: NSMenuItem) {
+        guard let data = sender.representedObject as? [String: String],
+              let name = data["id"], let position = data["position"] else { return }
+        let groups = store.groups()
+        guard let current = groups.firstIndex(of: name) else { return }
+        store.reorderGroup(name, to: sortDestination(position, current: current, count: groups.count))
+        reloadGroups(); reloadChips()
+    }
+
+    @objc private func sortCommand(_ sender: NSMenuItem) {
+        guard let data = sender.representedObject as? [String: String],
+              let id = data["id"], let position = data["position"],
+              let command = store.commands.first(where: { $0.id == id }) else { return }
+        let group = command.group.isEmpty ? "默认" : command.group
+        let commands = store.commands.filter { ($0.group.isEmpty ? "默认" : $0.group) == group }
+        guard let current = commands.firstIndex(where: { $0.id == id }) else { return }
+        store.reorderCommand(id, to: sortDestination(position, current: current, count: commands.count))
+        reloadChips()
+    }
+
+    private func sortDestination(_ position: String, current: Int, count: Int) -> Int {
+        switch position {
+        case "first": return 0
+        case "previous": return max(0, current - 1)
+        case "next": return min(max(0, count - 1), current + 1)
+        case "last": return max(0, count - 1)
+        default: return current
+        }
     }
     /// 复制命令 = 把**命令文本**丢进剪贴板（方便贴到别处），不是复制出一条新命令。
     @objc private func copyCommandText(_ sender: NSMenuItem) {
@@ -655,5 +891,89 @@ final class CommandPanel: NSView {
         tf.stringValue = defaultValue
         a.accessoryView = tf; a.window.initialFirstResponder = tf
         return a.runModal() == .alertFirstButtonReturn ? tf.stringValue : nil
+    }
+}
+
+/// Tab 补全候选窗：与历史窗口一致使用弹出式滚动列表，候选可直接点击写入编辑器。
+private final class CompletionListVC: NSViewController {
+    var items: [(title: String, value: String)] = []
+    var onSelect: ((String) -> Void)?
+    private var buttons: [PillButton] = []
+    private var selectedIndex = 0
+    private var keyMonitor: Any?
+
+    deinit {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+    }
+
+    override func loadView() {
+        let root = NSView()
+        root.wantsLayer = true; root.layer?.backgroundColor = Theme.bg.cgColor
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView()
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        doc.addSubview(stack); scroll.documentView = doc; root.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: root.topAnchor, constant: 4),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 4),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -4),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
+            stack.topAnchor.constraint(equalTo: doc.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: doc.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
+            stack.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+        ])
+        for (index, item) in items.enumerated() {
+            let button = PillButton(item.title, style: .ghost, hPad: 7, height: 24,
+                                    font: Theme.mono(11), target: self, action: #selector(selectItem(_:)))
+            button.tag = index; button.alignment = .left
+            stack.addArrangedSubview(button)
+            button.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            buttons.append(button)
+        }
+        // 固定尺寸确保候选少或多时弹窗位置一致；内容不足处留白，过多时滚动。
+        root.frame = NSRect(x: 0, y: 0, width: 420, height: 260)
+        view = root
+        updateSelection()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            switch event.keyCode {
+            case 125: // ↓
+                self.selectedIndex = min(self.items.count - 1, self.selectedIndex + 1)
+                self.updateSelection(); return nil
+            case 126: // ↑
+                self.selectedIndex = max(0, self.selectedIndex - 1)
+                self.updateSelection(); return nil
+            case 36, 76: // Return / keypad Enter
+                self.confirmSelection(); return nil
+            case 53: // Esc
+                self.view.window?.performClose(nil); return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    @objc private func selectItem(_ sender: NSButton) {
+        guard items.indices.contains(sender.tag) else { return }
+        onSelect?(items[sender.tag].value)
+    }
+
+    private func updateSelection() {
+        guard !buttons.isEmpty else { return }
+        for (index, button) in buttons.enumerated() {
+            button.style = index == selectedIndex ? .primary : .ghost
+        }
+        buttons[selectedIndex].scrollToVisible(buttons[selectedIndex].bounds)
+    }
+
+    private func confirmSelection() {
+        guard items.indices.contains(selectedIndex) else { return }
+        onSelect?(items[selectedIndex].value)
     }
 }

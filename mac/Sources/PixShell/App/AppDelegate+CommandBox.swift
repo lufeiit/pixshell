@@ -31,9 +31,27 @@ extension AppDelegate: NSTextFieldDelegate {
     /// Tab 补全：把最后一个 token 当远端路径前缀，用 ls 列同级候选。
     func completeRemotePath() {
         guard let cmdInput = cmdInput else { return }
+        completeRemoteText(cmdInput.stringValue) { [weak self] candidates in
+            if candidates.count == 1 { self?.cmdInput?.stringValue = candidates[0].value }
+        }
+    }
+
+    /// 编辑器 Tab 补全：首个 token 查询远端命令，其余 token 查询远端路径。
+    func completeRemoteText(_ text: String,
+                            apply: @escaping ([(title: String, value: String)]) -> Void) {
         guard sessions.indices.contains(current), let ssh = sessions[current].ssh else { return }
-        let text = cmdInput.stringValue
-        guard let lastSpace = text.lastIndex(of: " ") else { return }   // 第一个 token 是命令名，不补路径
+        if !text.contains(where: { $0.isWhitespace }) {
+            let stub = text
+            guard !stub.isEmpty else { return }
+            let inner = "compgen -c -- \(shellQuote(stub)) 2>/dev/null | sort -u"
+            ssh.exec("bash -lc \(shellQuote(inner))") { [weak self] out in
+                guard let self else { return }
+                let names = out.split(separator: "\n").map(String.init).filter { $0.hasPrefix(stub) }
+                self.returnCompletionCandidates(names, prefix: "", pathDirectory: nil, apply: apply)
+            }
+            return
+        }
+        guard let lastSpace = text.lastIndex(where: { $0.isWhitespace }) else { return }
         let prefixPart = String(text[..<text.index(after: lastSpace)])
         let token = String(text[text.index(after: lastSpace)...])
         // 拆出目录与待补名
@@ -45,25 +63,26 @@ extension AppDelegate: NSTextFieldDelegate {
             dir = sftpPanel?.currentRemotePath ?? "."
             stub = token
         }
-        let quoted = dir.replacingOccurrences(of: "'", with: "'\\''")
-        ssh.exec("ls -1ap '\(quoted)' 2>/dev/null") { [weak self] out in
+        ssh.exec("ls -1ap \(shellQuote(dir)) 2>/dev/null") { [weak self] out in
             guard let self = self else { return }
             let names = out.split(separator: "\n").map(String.init)
                 .filter { $0 != "./" && $0 != "../" && (stub.isEmpty || $0.hasPrefix(stub)) }
-            guard !names.isEmpty else { return }
-            if names.count == 1 {
-                let joined = token.contains("/") ? dir + names[0] : names[0]
-                self.cmdInput.stringValue = prefixPart + joined
-            } else {
-                // 多候选：补到公共前缀，并把候选打到状态栏
-                let common = self.commonPrefix(names)
-                if common.count > stub.count {
-                    let joined = token.contains("/") ? dir + common : common
-                    self.cmdInput?.stringValue = prefixPart + joined
-                }
-                self.setStatus(names.prefix(8).joined(separator: "  "))
-            }
+            self.returnCompletionCandidates(names, prefix: prefixPart,
+                                            pathDirectory: token.contains("/") ? dir : nil, apply: apply)
         }
+    }
+
+    private func returnCompletionCandidates(_ names: [String], prefix: String,
+                                            pathDirectory: String?,
+                                            apply: @escaping ([(title: String, value: String)]) -> Void) {
+        let candidates = names.prefix(200).map { name in
+            (title: name, value: prefix + (pathDirectory.map { $0 + name } ?? name))
+        }
+        DispatchQueue.main.async { apply(candidates) }
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
     private func commonPrefix(_ list: [String]) -> String {
         guard var p = list.first else { return "" }
@@ -138,8 +157,8 @@ extension AppDelegate: NSTextFieldDelegate {
 
     // MARK: 历史弹出（命令栏「历史」按钮）
     @objc func showCommandHistory(_ sender: Any) {
-        let prefix = cmdPanel?.editor.string ?? ""
-        let items = cmdHistory.filter(prefix: prefix, limit: 100)
+        // 历史文件为全局共享，不按当前主机或编辑器内容过滤。
+        let items = cmdHistory.filter(prefix: "", limit: 100)
         guard !items.isEmpty else { setStatus("暂无历史命令"); return }
         
         let vc = CommandHistoryVC()

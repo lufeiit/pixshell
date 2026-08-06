@@ -1,5 +1,17 @@
 import AppKit
 
+extension NSWindow {
+    /// 将辅助窗口放到主窗口当前所在屏幕的可用区域中央，适配多显示器移动后的再次打开。
+    func center(onScreenOf parent: NSWindow?) {
+        guard let screen = parent?.screen ?? NSApp.keyWindow?.screen ?? NSScreen.main else {
+            center(); return
+        }
+        let area = screen.visibleFrame
+        setFrameOrigin(NSPoint(x: area.midX - frame.width / 2,
+                               y: area.midY - frame.height / 2))
+    }
+}
+
 /// 翻转坐标视图：作 NSScrollView 的 documentView 时，内容从**顶部**排列（否则会沉底）。
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
@@ -55,6 +67,8 @@ final class PillButton: NSButton {
     private let heightC: CGFloat
 
     private let customFont: NSFont?
+    /// 仅覆盖文字/符号颜色，保留原按钮背景和悬停样式。
+    var foregroundColorOverride: NSColor? { didSet { restyle() } }
     init(_ title: String, style: Style = .secondary, hPad: CGFloat = 14, height: CGFloat = 28,
          font: NSFont? = nil, target: AnyObject? = nil, action: Selector? = nil) {
         _style = style; self.hPad = hPad; self.heightC = height; self.customFont = font
@@ -88,7 +102,7 @@ final class PillButton: NSButton {
         }
         layer?.backgroundColor = bgc.cgColor
         attributedTitle = NSAttributedString(string: title, attributes: [
-            .foregroundColor: fgc,
+            .foregroundColor: foregroundColorOverride ?? fgc,
             .font: customFont ?? Theme.ui(12, _style == .primary ? .semibold : .medium),
         ])
     }

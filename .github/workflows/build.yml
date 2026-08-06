@@ -2,25 +2,23 @@ name: build
 
 on:
   push:
-    tags: [ 'v*' ]
-  pull_request:
-    branches: [ main ]
+    branches: [ 'agent/ci' ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # Tag v0.1.1 → 0.1.1; branch/PR/dispatch default 0.1.1
-  PRODUCT_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.1.1' }}
+  # fork 的 agent/ci 测试发行版固定使用此版本号。
+  PRODUCT_VERSION: '1.7.5'
 
 jobs:
   # ─────────────────────────────────────────────
-  # macOS matrix: arm64 + x64 → dmg + zip
+  # macOS matrix: arm64 + x64 → dmg
   # ─────────────────────────────────────────────
   macos:
     name: macOS ${{ matrix.arch_label }}
@@ -249,12 +247,11 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────
-  # Optional release on tag v*
+  # agent/ci 构建完成后创建或更新固定版本的 GitHub Release
   # ─────────────────────────────────────────────
   release:
     name: GitHub Release
     needs: [macos, windows]
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -267,11 +264,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          RAW="${GITHUB_REF_NAME}"
-          RAW="${RAW#v}"
+          RAW="${PRODUCT_VERSION}"
           echo "version=$RAW" >> "$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          echo "Resolved release version: $RAW (tag ${GITHUB_REF_NAME})"
+          echo "tag=v$RAW" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: $RAW (tag v$RAW)"
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -319,17 +315,22 @@ jobs:
           fi
           notes="PixShell ${VERSION}
 
-          - macOS arm64 / x64: .dmg + .zip (unsigned CI build)
+          - macOS arm64 / x64: .dmg (unsigned CI build)
           - Windows x64: self-contained .zip + Inno Setup installer
 
           Tag: ${TAG}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists — uploading assets"
+            echo "Release $TAG exists — updating target and assets"
+            gh release edit "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "PixShell ${VERSION}" \
+              --notes "$notes"
             gh release upload "$TAG" "${files[@]}" --clobber
           else
             echo "Creating release $TAG"
             gh release create "$TAG" "${files[@]}" \
+              --target "$GITHUB_SHA" \
               --title "PixShell ${VERSION}" \
               --notes "$notes"
           fi

@@ -81,6 +81,39 @@ final class QuickCommandStore {
         return out
     }
 
+    /// 按用户指定的位置重排分组；把完整顺序写入 groups 文件，重启后保持不变。
+    func reorderGroup(_ name: String, to requestedIndex: Int) {
+        var order = groups()
+        guard let old = order.firstIndex(of: name), order.count > 1 else { return }
+        order.remove(at: old)
+        order.insert(name, at: min(max(0, requestedIndex), order.count))
+        emptyGroups = order
+        saveGroups()
+    }
+
+    /// 在命令所属分组内部重排，不改变命令的分组。
+    func reorderCommand(_ id: String, to requestedIndex: Int) {
+        guard let command = commands.first(where: { $0.id == id }) else { return }
+        let group = command.group.isEmpty ? "默认" : command.group
+        var grouped = commands.filter { ($0.group.isEmpty ? "默认" : $0.group) == group }
+        guard let old = grouped.firstIndex(where: { $0.id == id }), grouped.count > 1 else { return }
+        let moved = grouped.remove(at: old)
+        grouped.insert(moved, at: min(max(0, requestedIndex), grouped.count))
+        var iterator = grouped.makeIterator()
+        commands = commands.map {
+            ($0.group.isEmpty ? "默认" : $0.group) == group ? (iterator.next() ?? $0) : $0
+        }
+        save()
+    }
+
+    /// “全部”视图中的拖动按完整命令数组重排，命令所属分组保持不变。
+    func reorderAllCommands(from source: Int, to destination: Int) {
+        guard commands.indices.contains(source), source != destination else { return }
+        let moved = commands.remove(at: source)
+        commands.insert(moved, at: min(max(0, destination), commands.count))
+        save()
+    }
+
     /// 新建分组。已存在返回 false（调用方据此提示）。
     @discardableResult
     func addGroup(_ name: String) -> Bool {

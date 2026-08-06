@@ -309,7 +309,8 @@ public partial class CommandPanel : UserControl
                 ToolTip = $"${{{name}}}",
             };
             foreach (var value in history) box.Items.Add(value);
-            box.Text = history.FirstOrDefault() ?? declared?.DefaultValue ?? "";
+            box.Text = history.FirstOrDefault() ?? declared?.DefaultValue
+                ?? CommandParams.DefaultValue(command.Command, name) ?? "";
 
             var field = new StackPanel { Margin = new Thickness(0, 0, 4, 0) };
             field.Children.Add(new TextBlock

@@ -14,6 +14,10 @@ final class FlowView: NSView {
     var inset = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
 
     private var heightC: NSLayoutConstraint!
+    private var orderedViews: [NSView] = []
+    private var reorderHandler: ((Int, Int) -> Void)?
+    private var dragOriginalIndex: Int?
+    private var dragCurrentIndex: Int?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -36,7 +40,7 @@ final class FlowView: NSView {
         var y = inset.top
         var rowH: CGFloat = 0
 
-        for v in subviews where !v.isHidden {
+        for v in orderedViews where !v.isHidden {
             let s = v.fittingSize
             // 一行放不下就折行（行首那个即使超宽也不折，否则会死循环）
             if x > inset.left, x + s.width > maxW + inset.left {
@@ -65,10 +69,60 @@ final class FlowView: NSView {
     /// 子视图**内部**的约束不受影响 —— 外层 frame 由我们定，内部照旧 Auto Layout，这是标准配合方式。
     func setItems(_ views: [NSView]) {
         subviews.forEach { $0.removeFromSuperview() }
+        orderedViews = views
+        reorderHandler = nil
         for v in views {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
         }
         needsLayout = true
+    }
+
+    /// 为流式项目启用直接拖动排序。`draggableCount` 可把末尾的“全部”等固定入口排除。
+    func setReorderableItems(_ views: [NSView], draggableCount: Int? = nil,
+                             onMove: @escaping (Int, Int) -> Void) {
+        setItems(views)
+        reorderHandler = onMove
+        let count = min(draggableCount ?? views.count, views.count)
+        for view in views.prefix(count) {
+            let pan = NSPanGestureRecognizer(target: self, action: #selector(handleReorderPan(_:)))
+            view.addGestureRecognizer(pan)
+        }
+    }
+
+    @objc private func handleReorderPan(_ gesture: NSPanGestureRecognizer) {
+        guard let dragged = gesture.view, reorderHandler != nil else { return }
+        switch gesture.state {
+        case .began:
+            guard let index = orderedViews.firstIndex(of: dragged) else { return }
+            dragOriginalIndex = index; dragCurrentIndex = index
+            dragged.alphaValue = 0.65
+        case .changed:
+            let point = gesture.location(in: self)
+            guard let current = dragCurrentIndex,
+                  let target = nearestItemIndex(to: point), target != current else { return }
+            orderedViews.remove(at: current)
+            orderedViews.insert(dragged, at: target)
+            dragCurrentIndex = target
+            needsLayout = true
+            layoutSubtreeIfNeeded()
+        case .ended:
+            dragged.alphaValue = 1
+            if let from = dragOriginalIndex, let to = dragCurrentIndex, from != to { reorderHandler?(from, to) }
+            dragOriginalIndex = nil; dragCurrentIndex = nil
+        case .cancelled, .failed:
+            dragged.alphaValue = 1
+            dragOriginalIndex = nil; dragCurrentIndex = nil
+        default: break
+        }
+    }
+
+    private func nearestItemIndex(to point: NSPoint) -> Int? {
+        guard !orderedViews.isEmpty else { return nil }
+        return orderedViews.enumerated().min { lhs, rhs in
+            let lp = NSPoint(x: lhs.element.frame.midX, y: lhs.element.frame.midY)
+            let rp = NSPoint(x: rhs.element.frame.midX, y: rhs.element.frame.midY)
+            return hypot(lp.x - point.x, lp.y - point.y) < hypot(rp.x - point.x, rp.y - point.y)
+        }?.offset
     }
 }

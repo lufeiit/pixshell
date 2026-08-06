@@ -60,7 +60,8 @@ final class ConnManager: NSWindowController, NSTextFieldDelegate {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func show() {
+    func show(relativeTo parent: NSWindow? = nil) {
+        window?.center(onScreenOf: parent)
         window?.makeKeyAndOrderFront(nil)
         reload()
     }

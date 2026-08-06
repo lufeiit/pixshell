@@ -56,12 +56,12 @@ final class BackupPanel: NSWindowController {
     required init?(coder: NSCoder) { fatalError() }
     deinit { if let logObserver { NotificationCenter.default.removeObserver(logObserver) } }
 
-    func show(enabled set: Set<String>) {
+    func show(enabled set: Set<String>, relativeTo parent: NSWindow? = nil) {
         enabled = set
         for (id, b) in checks { b.state = set.contains(id) ? .on : .off }
         refreshConfigurationState()
         refreshSyncLog()
-        window?.center()
+        window?.center(onScreenOf: parent)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

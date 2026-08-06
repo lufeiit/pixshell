@@ -136,12 +136,17 @@ final class CommandHistory {
     }
 }
 
-// MARK: - 自定义命令参数模板 `${name}`
+// MARK: - 自定义命令参数模板 `${name}` / `${name:默认值}`
 
 enum CommandParams {
+    /// 参数名使用 Unicode 字母/数字，支持 `${port}`、`${端口}`、`${服务器_1}`。
+    /// 第一个冒号后的内容是默认值；默认值允许继续包含 URL 协议、端口等任意冒号。
+    /// 首字符不能是标点；后续额外允许点和短横线，避免把任意 `${...}` 内容误当参数。
+    private static let pattern = "\\$\\{([\\p{L}\\p{N}_][\\p{L}\\p{N}_.-]*)(?::([^}]*))?\\}"
+
     /// 取出模板里的参数名（去重、保序）
     static func parse(_ template: String) -> [String] {
-        guard let re = try? NSRegularExpression(pattern: "\\$\\{([a-zA-Z0-9_]+)\\}") else { return [] }
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = template as NSString
         var names: [String] = []
         for m in re.matches(in: template, range: NSRange(location: 0, length: ns.length)) {
@@ -151,9 +156,20 @@ enum CommandParams {
         return names
     }
 
+    /// 读取 `${name:默认值}` 的内联默认值。
+    static func defaultValue(_ template: String, for name: String) -> String? {
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = template as NSString
+        for m in re.matches(in: template, range: NSRange(location: 0, length: ns.length))
+        where ns.substring(with: m.range(at: 1)) == name && m.range(at: 2).location != NSNotFound {
+            return ns.substring(with: m.range(at: 2))
+        }
+        return nil
+    }
+
     /// 用取值渲染模板；缺失的占位符原样保留
     static func render(_ template: String, values: [String: String]) -> String {
-        guard let re = try? NSRegularExpression(pattern: "\\$\\{([a-zA-Z0-9_]+)\\}") else { return template }
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return template }
         let ns = template as NSString
         var out = ""
         var idx = 0

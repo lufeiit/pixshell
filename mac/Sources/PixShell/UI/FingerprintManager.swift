@@ -32,8 +32,8 @@ final class FingerprintManager: NSWindowController {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func show() {
-        window?.center()
+    func show(relativeTo parent: NSWindow? = nil) {
+        window?.center(onScreenOf: parent)
         window?.makeKeyAndOrderFront(nil)
         reload()
     }

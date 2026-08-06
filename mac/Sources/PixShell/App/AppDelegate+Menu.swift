@@ -40,7 +40,7 @@ extension AppDelegate {
         if sessions.indices.contains(current), !sessions[current].connected {
             menuReconnect(); return
         }
-        connMgr.show()   // 没有活动会话 → 打开连接管理器选主机
+        connMgr.show(relativeTo: window)   // 没有活动会话 → 打开连接管理器选主机
     }
     @objc func menuDisconnect() {
         guard sessions.indices.contains(current) else { return }
@@ -347,7 +347,7 @@ extension AppDelegate {
     // MARK: 云端同步
     @objc func openBackup() {
         // 独立弹窗；尺寸约连接管理器，不再盖住主窗底栏
-        backupPanel.show(enabled: backupEnabled)
+        backupPanel.show(enabled: backupEnabled, relativeTo: window)
     }
 
     // MARK: 设置（终端字号 / 主题 / 语义高亮）
